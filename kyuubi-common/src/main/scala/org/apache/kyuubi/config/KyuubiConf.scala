@@ -2517,10 +2517,18 @@ object KyuubiConf {
       .doc("The server information provider name, some clients may rely on this information" +
         " to check the server compatibilities and functionalities." +
         " <li>SERVER: Return Kyuubi server information.</li>" +
-        " <li>ENGINE: Return Kyuubi engine information.</li>")
-      .version("1.6.1")
+        " <li>ENGINE: Return Kyuubi engine information.</li>" +
+        " <li>CUSTOM: Return user-defined information.</li>")
+      .version("1.8.1")
       .stringConf
       .createWithDefault("ENGINE")
+
+  val SERVER_CUSTOM_INFO: OptionalConfigEntry[String] =
+    buildConf(key = "kyuubi.server.custom.info")
+      .doc("User-defined information for Kyuubi server provider.")
+      .version("1.8.1")
+      .stringConf
+      .createOptional
 
   val ENGINE_SPARK_SHOW_PROGRESS: ConfigEntry[Boolean] =
     buildConf("kyuubi.session.engine.spark.showProgress")

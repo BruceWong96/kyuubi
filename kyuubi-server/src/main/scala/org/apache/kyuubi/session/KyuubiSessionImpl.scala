@@ -265,6 +265,13 @@ class KyuubiSessionImpl(
           waitForEngineLaunched()
           client.getInfo(infoType).getInfoValue
         }
+      case "CUSTOM" =>
+        val serverInfo = sessionConf.get(SERVER_CUSTOM_INFO)
+        if(serverInfo.isEmpty) {
+          throw new IllegalArgumentException(
+            "kyuubi.server.custom.info must be set when server info provider was CUSTOM.")
+        }
+        TGetInfoValue.stringValue(serverInfo.get)
       case unknown => throw new IllegalArgumentException(s"Unknown server info provider $unknown")
     }
   }
