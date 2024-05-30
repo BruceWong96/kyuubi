@@ -18,6 +18,7 @@
 package org.apache.kyuubi.client;
 
 import java.util.*;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.kyuubi.client.api.v1.dto.Engine;
 import org.apache.kyuubi.client.api.v1.dto.OperationData;
 import org.apache.kyuubi.client.api.v1.dto.ServerData;
@@ -59,6 +60,11 @@ public class AdminRestApi {
     return this.getClient().post(path, null, client.getAuthHeader());
   }
 
+  public String refreshDenyIps() {
+    String path = String.format("%s/%s", API_BASE_PATH, "refresh/deny_ips");
+    return this.getClient().post(path, null, client.getAuthHeader());
+  }
+
   public String deleteEngine(
       String engineType, String shareLevel, String subdomain, String hs2ProxyUser) {
     Map<String, Object> params = new HashMap<>();
@@ -83,13 +89,16 @@ public class AdminRestApi {
   }
 
   public List<SessionData> listSessions() {
-    return listSessions(Collections.emptyList());
+    return listSessions(Collections.emptyList(), null);
   }
 
-  public List<SessionData> listSessions(List<String> users) {
+  public List<SessionData> listSessions(List<String> users, String sessionType) {
     Map<String, Object> params = new HashMap<>();
     if (users != null && !users.isEmpty()) {
       params.put("users", String.join(",", users));
+    }
+    if (StringUtils.isNotBlank(sessionType)) {
+      params.put("sessionType", sessionType);
     }
     SessionData[] result =
         this.getClient()
@@ -103,10 +112,28 @@ public class AdminRestApi {
   }
 
   public List<OperationData> listOperations() {
+    return listOperations(Collections.emptyList(), null, null);
+  }
+
+  public List<OperationData> listOperations(
+      List<String> users, String sessionHandleStr, String sessionType) {
+    Map<String, Object> params = new HashMap<>();
+    if (users != null && !users.isEmpty()) {
+      params.put("users", String.join(",", users));
+    }
+    if (StringUtils.isNotBlank(sessionHandleStr)) {
+      params.put("sessionHandle", sessionHandleStr);
+    }
+    if (StringUtils.isNotBlank(sessionType)) {
+      params.put("sessionType", sessionType);
+    }
     OperationData[] result =
         this.getClient()
             .get(
-                API_BASE_PATH + "/operations", null, OperationData[].class, client.getAuthHeader());
+                API_BASE_PATH + "/operations",
+                params,
+                OperationData[].class,
+                client.getAuthHeader());
     return Arrays.asList(result);
   }
 

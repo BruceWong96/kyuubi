@@ -34,6 +34,8 @@ import org.apache.kyuubi.{KYUUBI_VERSION, KyuubiFunSuite, SCALA_COMPILE_VERSION,
 import org.apache.kyuubi.config.KyuubiConf
 import org.apache.kyuubi.config.KyuubiConf.{ENGINE_FLINK_APPLICATION_JARS, KYUUBI_HOME}
 import org.apache.kyuubi.ha.HighAvailabilityConf.HA_ADDRESSES
+import org.apache.kyuubi.util.JavaUtils
+import org.apache.kyuubi.util.command.CommandLineUtils._
 import org.apache.kyuubi.zookeeper.EmbeddedZookeeper
 import org.apache.kyuubi.zookeeper.ZookeeperConf.{ZK_CLIENT_PORT, ZK_CLIENT_PORT_ADDRESS}
 
@@ -130,7 +132,7 @@ trait WithFlinkSQLEngineOnYarn extends KyuubiFunSuite with WithFlinkTestResource
     writer.close()
 
     val envs = scala.collection.mutable.Map[String, String]()
-    val kyuubiExternals = Utils.getCodeSourceLocation(getClass)
+    val kyuubiExternals = JavaUtils.getCodeSourceLocation(getClass)
       .split("externals").head
     val flinkHome = {
       val candidates = Paths.get(kyuubiExternals, "externals", "kyuubi-download", "target")
@@ -179,10 +181,7 @@ trait WithFlinkSQLEngineOnYarn extends KyuubiFunSuite with WithFlinkTestResource
       conf.set(k, v)
     }
 
-    for ((k, v) <- conf.getAll) {
-      command += "--conf"
-      command += s"$k=$v"
-    }
+    command ++= confKeyValues(conf.getAll)
 
     processBuilder.command(command.toList.asJava)
     processBuilder.redirectOutput(Redirect.INHERIT)
@@ -241,7 +240,7 @@ trait WithFlinkSQLEngineOnYarn extends KyuubiFunSuite with WithFlinkTestResource
         .find(Files.exists(_)).map(_.toAbsolutePath.toFile.getCanonicalPath)
     }.orElse {
       // 3. get the main resource from dev environment
-      val cwd = Utils.getCodeSourceLocation(getClass).split("externals")
+      val cwd = JavaUtils.getCodeSourceLocation(getClass).split("externals")
       assert(cwd.length > 1)
       Option(Paths.get(cwd.head, "externals", module, "target", jarName))
         .map(_.toAbsolutePath.toFile.getCanonicalPath)

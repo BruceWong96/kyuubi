@@ -75,7 +75,7 @@ class JpsApplicationOperationSuite extends KyuubiFunSuite {
       .set("spark.abc", id)
       .set("spark.master", "local")
       .set(SESSION_IDLE_TIMEOUT, Duration.ofMinutes(3).toMillis)
-    val builder = new SparkProcessBuilder(user, conf)
+    val builder = new SparkProcessBuilder(user, true, conf)
     builder.start
 
     assert(jps.isSupported(ApplicationManagerInfo(builder.clusterManager())))
@@ -83,6 +83,8 @@ class JpsApplicationOperationSuite extends KyuubiFunSuite {
       val desc1 = jps.getApplicationInfoByTag(ApplicationManagerInfo(None), id)
       assert(desc1.id != null)
       assert(desc1.name != null)
+      assert(!desc1.name.contains("org.apache.spark.launcher.Main"))
+      assert(desc1.name.contains("org.apache.spark.deploy.SparkSubmit"))
       assert(desc1.state == ApplicationState.RUNNING)
       val response = jps.killApplicationByTag(ApplicationManagerInfo(None), id)
       assert(response._1, response._2)

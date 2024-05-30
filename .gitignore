@@ -58,6 +58,7 @@ spark-warehouse/
 metastore_db
 derby.log
 rest-audit.log
+**/.flattened-pom.xml
 **/dependency-reduced-pom.xml
 metrics/
 /kyuubi-ha/embedded_zookeeper/
@@ -75,8 +76,13 @@ embedded_zookeeper/
 conf/log4j2.xml
 conf/kyuubi-defaults.conf
 conf/kyuubi-env.sh
+.java-version
 
 # For Antlr
 kyuubi-server/gen
 kyuubi-server/src/main/antlr4/org/apache/kyuubi/sql/*.tokens
 kyuubi-server/src/main/antlr4/org/apache/kyuubi/sql/gen/
+
+# For draw.io
+.$*.bkp
+.$*.dtmp

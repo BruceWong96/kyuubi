@@ -17,14 +17,12 @@
 
 package org.apache.kyuubi.operation
 
-import java.io.IOException
 import java.nio.file.{Files, Paths}
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 import com.codahale.metrics.MetricRegistry
 import com.google.common.annotations.VisibleForTesting
-import org.apache.hive.service.rpc.thrift._
 
 import org.apache.kyuubi.{KyuubiException, KyuubiSQLException, Utils}
 import org.apache.kyuubi.config.KyuubiConf
@@ -37,6 +35,7 @@ import org.apache.kyuubi.operation.OperationState.{isTerminal, CANCELED, Operati
 import org.apache.kyuubi.operation.log.OperationLog
 import org.apache.kyuubi.server.metadata.api.Metadata
 import org.apache.kyuubi.session.KyuubiBatchSession
+import org.apache.kyuubi.shaded.hive.service.rpc.thrift._
 
 /**
  * The state of batch operation is special. In general, the lifecycle of state is:
@@ -101,6 +100,9 @@ class BatchJobSubmission(
       getOperationLog)
   }
 
+  def startupProcessAlive: Boolean =
+    builder.processLaunched && Option(builder.process).exists(_.isAlive)
+
   override def currentApplicationInfo(): Option[ApplicationInfo] = {
     if (isTerminal(state) && _applicationInfo.map(_.state).exists(ApplicationState.isTerminated)) {
       return _applicationInfo
@@ -163,8 +165,16 @@ class BatchJobSubmission(
   private def setStateIfNotCanceled(newState: OperationState): Unit = withLockRequired {
     if (state != CANCELED) {
       setState(newState)
-      applicationId(_applicationInfo).foreach { appId =>
-        session.getSessionEvent.foreach(_.engineId = appId)
+      _applicationInfo.foreach { app =>
+        Option(app.id).filter(_.nonEmpty).foreach { appId =>
+          session.getSessionEvent.foreach(_.engineId = appId)
+        }
+        Option(app.name).filter(_.nonEmpty).foreach { appName =>
+          session.getSessionEvent.foreach(_.engineName = appName)
+        }
+        app.url.filter(_.nonEmpty).foreach { appUrl =>
+          session.getSessionEvent.foreach(_.engineUrl = appUrl)
+        }
       }
       if (newState == RUNNING) {
         session.onEngineOpened()
@@ -182,7 +192,7 @@ class BatchJobSubmission(
     OperationLog.removeCurrentOperationLog()
   }
 
-  override protected def runInternal(): Unit = session.handleSessionException {
+  override protected def runInternal(): Unit = {
     val asyncOperation: Runnable = () => {
       try {
         metadata match {
@@ -336,14 +346,8 @@ class BatchJobSubmission(
     }
   }
 
-  override def close(): Unit = withLockRequired {
+  override def close(): Unit = withLockRequired(withClosingOperationLog {
     if (!isClosedOrCanceled) {
-      try {
-        getOperationLog.foreach(_.close())
-      } catch {
-        case e: IOException => error(e.getMessage, e)
-      }
-
       MetricsSystem.tracing(_.decCount(MetricRegistry.name(OPERATION_OPEN, opType)))
 
       // fast fail
@@ -379,7 +383,7 @@ class BatchJobSubmission(
         }
       }
     }
-  }
+  })
 
   override def cancel(): Unit = {
     throw new IllegalStateException("Use close instead.")

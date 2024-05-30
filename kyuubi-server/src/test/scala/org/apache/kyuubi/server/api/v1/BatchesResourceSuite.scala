@@ -24,10 +24,10 @@ import javax.ws.rs.client.Entity
 import javax.ws.rs.core.{MediaType, Response}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration.DurationInt
 
-import org.apache.hive.service.rpc.thrift.TProtocolVersion
 import org.glassfish.jersey.media.multipart.FormDataMultiPart
 import org.glassfish.jersey.media.multipart.file.FileDataBodyPart
 
@@ -45,8 +45,9 @@ import org.apache.kyuubi.operation.OperationState.OperationState
 import org.apache.kyuubi.server.{KyuubiBatchService, KyuubiRestFrontendService}
 import org.apache.kyuubi.server.http.util.HttpAuthUtils.{basicAuthorizationHeader, AUTHORIZATION_HEADER}
 import org.apache.kyuubi.server.metadata.api.{Metadata, MetadataFilter}
-import org.apache.kyuubi.service.authentication.{AnonymousAuthenticationProviderImpl, KyuubiAuthenticationFactory}
+import org.apache.kyuubi.service.authentication.{AnonymousAuthenticationProviderImpl, AuthUtils}
 import org.apache.kyuubi.session.{KyuubiBatchSession, KyuubiSessionManager, SessionHandle, SessionType}
+import org.apache.kyuubi.shaded.hive.service.rpc.thrift.TProtocolVersion
 
 class BatchesV1ResourceSuite extends BatchesResourceSuiteBase {
   override def batchVersion: String = "1"
@@ -84,7 +85,7 @@ abstract class BatchesResourceSuiteBase extends KyuubiFunSuite
   override protected lazy val conf: KyuubiConf = {
     val testResourceDir = Paths.get(sparkBatchTestResource.get).getParent
     val kyuubiConf = KyuubiConf()
-      .set(AUTHENTICATION_METHOD, Set("CUSTOM"))
+      .set(AUTHENTICATION_METHOD, Seq("CUSTOM"))
       .set(AUTHENTICATION_CUSTOM_CLASS, classOf[AnonymousAuthenticationProviderImpl].getName)
       .set(SERVER_ADMINISTRATORS, Set("admin"))
       .set(BATCH_IMPL_VERSION, batchVersion)
@@ -129,7 +130,7 @@ abstract class BatchesResourceSuiteBase extends KyuubiFunSuite
     assert(batch.getEndTime === 0)
 
     requestObj.setConf((requestObj.getConf.asScala ++
-      Map(KyuubiAuthenticationFactory.HS2_PROXY_USER -> "root")).asJava)
+      Map(AuthUtils.HS2_PROXY_USER -> "root")).asJava)
     val proxyUserRequest = requestObj
     val proxyUserResponse = webTarget.path("api/v1/batches")
       .request(MediaType.APPLICATION_JSON_TYPE)
@@ -201,8 +202,8 @@ abstract class BatchesResourceSuiteBase extends KyuubiFunSuite
 
       // check both kyuubi log and engine log
       assert(
-        logs.exists(_.contains("/bin/spark-submit")) &&
-          logs.exists(_.contains(s"SparkContext: Submitted application: $sparkBatchTestAppName")))
+        logs.exists(_.contains("bin/spark-submit")) &&
+          logs.exists(_.contains(s"Submitted application: $sparkBatchTestAppName")))
     }
 
     // invalid user name
@@ -211,7 +212,7 @@ abstract class BatchesResourceSuiteBase extends KyuubiFunSuite
       .header(AUTHORIZATION_HEADER, basicAuthorizationHeader(batch.getId))
       .delete()
     assert(deleteBatchResponse.getStatus === 405)
-    errorMessage = s"${batch.getId} is not allowed to close the session belong to anonymous"
+    errorMessage = s"Failed to validate proxy privilege of ${batch.getId} for anonymous"
     assert(deleteBatchResponse.readEntity(classOf[String]).contains(errorMessage))
 
     // invalid batchId
@@ -227,16 +228,6 @@ abstract class BatchesResourceSuiteBase extends KyuubiFunSuite
       .header(AUTHORIZATION_HEADER, basicAuthorizationHeader("anonymous"))
       .delete()
     assert(deleteBatchResponse.getStatus === 404)
-
-    // invalid proxy user
-    deleteBatchResponse = webTarget.path(s"api/v1/batches/${batch.getId}")
-      .queryParam("hive.server2.proxy.user", "invalidProxy")
-      .request(MediaType.APPLICATION_JSON_TYPE)
-      .header(AUTHORIZATION_HEADER, basicAuthorizationHeader("anonymous"))
-      .delete()
-    assert(deleteBatchResponse.getStatus === 405)
-    errorMessage = "Failed to validate proxy privilege of anonymous for invalidProxy"
-    assert(deleteBatchResponse.readEntity(classOf[String]).contains(errorMessage))
 
     // check close batch session
     deleteBatchResponse = webTarget.path(s"api/v1/batches/${batch.getId}")
@@ -534,7 +525,7 @@ abstract class BatchesResourceSuiteBase extends KyuubiFunSuite
     val sessionManager = fe.be.sessionManager.asInstanceOf[KyuubiSessionManager]
     val kyuubiInstance = fe.connectionUrl
 
-    assert(sessionManager.getOpenSessionCount === 0)
+    assert(sessionManager.getActiveUserSessionCount === 0)
     val batchId1 = UUID.randomUUID().toString
     val batchId2 = UUID.randomUUID().toString
 
@@ -594,7 +585,7 @@ abstract class BatchesResourceSuiteBase extends KyuubiFunSuite
 
     val restFe = fe.asInstanceOf[KyuubiRestFrontendService]
     restFe.recoverBatchSessions()
-    assert(sessionManager.getOpenSessionCount === 2)
+    assert(sessionManager.getActiveUserSessionCount === 2)
 
     val sessionHandle1 = SessionHandle.fromUUID(batchId1)
     val sessionHandle2 = SessionHandle.fromUUID(batchId2)
@@ -760,9 +751,15 @@ abstract class BatchesResourceSuiteBase extends KyuubiFunSuite
         getBatchJobSubmissionStateCounter(OperationState.ERROR)
 
     val batchId = UUID.randomUUID().toString
-    val requestObj = newSparkBatchRequest(Map(
-      "spark.master" -> "local",
-      KYUUBI_BATCH_ID_KEY -> batchId))
+    val requestObj = newBatchRequest(
+      sparkBatchTestBatchType,
+      sparkBatchTestResource.get,
+      "org.apache.spark.examples.DriverSubmissionTest",
+      "DriverSubmissionTest-" + batchId,
+      Map(
+        "spark.master" -> "local",
+        KYUUBI_BATCH_ID_KEY -> batchId),
+      Seq("120"))
 
     eventually(timeout(10.seconds)) {
       val response = webTarget.path("api/v1/batches")
@@ -775,10 +772,8 @@ abstract class BatchesResourceSuiteBase extends KyuubiFunSuite
         batch.getState === OperationState.RUNNING.toString)
     }
 
-    eventually(timeout(10.seconds)) {
-      assert(getBatchJobSubmissionStateCounter(OperationState.INITIALIZED) +
-        getBatchJobSubmissionStateCounter(OperationState.PENDING) +
-        getBatchJobSubmissionStateCounter(OperationState.RUNNING) === 1)
+    eventually(timeout(20.seconds)) {
+      assert(getBatchJobSubmissionStateCounter(OperationState.RUNNING) === 1)
     }
 
     val deleteResp = webTarget.path(s"api/v1/batches/$batchId")
@@ -851,5 +846,45 @@ abstract class BatchesResourceSuiteBase extends KyuubiFunSuite
     assert(response.getStatus == 200)
     val getBatchListResponse = response.readEntity(classOf[GetBatchesResponse])
     assert(getBatchListResponse.getTotal == 1)
+  }
+
+  test("open batch session with proxyUser") {
+    val normalUser = "kyuubi"
+
+    def runOpenBatchExecutor(
+        kyuubiProxyUser: Option[String],
+        hs2ProxyUser: Option[String]): Response = {
+      val conf = mutable.Map("spark.master" -> "local")
+
+      kyuubiProxyUser.map { username =>
+        conf += (PROXY_USER.key -> username)
+      }
+      hs2ProxyUser.map { username =>
+        conf += (AuthUtils.HS2_PROXY_USER -> username)
+      }
+      val proxyUserRequest = newSparkBatchRequest(conf.toMap)
+
+      webTarget.path("api/v1/batches")
+        .request(MediaType.APPLICATION_JSON_TYPE)
+        .header(AUTHORIZATION_HEADER, basicAuthorizationHeader("anonymous"))
+        .post(Entity.entity(proxyUserRequest, MediaType.APPLICATION_JSON_TYPE))
+    }
+
+    // use kyuubi.session.proxy.user
+    val proxyUserResponse1 = runOpenBatchExecutor(Option(normalUser), None)
+    assert(proxyUserResponse1.getStatus === 405)
+    val errorMessage = s"Failed to validate proxy privilege of anonymous for $normalUser"
+    assert(proxyUserResponse1.readEntity(classOf[String]).contains(errorMessage))
+
+    // it should be the same behavior as hive.server2.proxy.user
+    val proxyUserResponse2 = runOpenBatchExecutor(None, Option(normalUser))
+    assert(proxyUserResponse2.getStatus === 405)
+    assert(proxyUserResponse2.readEntity(classOf[String]).contains(errorMessage))
+
+    // when both set, kyuubi.session.proxy.user takes precedence
+    val proxyUserResponse3 =
+      runOpenBatchExecutor(Option(normalUser), Option(s"${normalUser}HiveServer2"))
+    assert(proxyUserResponse3.getStatus === 405)
+    assert(proxyUserResponse3.readEntity(classOf[String]).contains(errorMessage))
   }
 }

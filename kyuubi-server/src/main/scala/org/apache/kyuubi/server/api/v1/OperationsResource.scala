@@ -26,13 +26,12 @@ import scala.util.control.NonFatal
 import io.swagger.v3.oas.annotations.media.{Content, Schema}
 import io.swagger.v3.oas.annotations.responses.ApiResponse
 import io.swagger.v3.oas.annotations.tags.Tag
-import org.apache.hive.service.rpc.thrift._
 
 import org.apache.kyuubi.{KyuubiSQLException, Logging}
 import org.apache.kyuubi.client.api.v1.dto._
-import org.apache.kyuubi.events.KyuubiOperationEvent
 import org.apache.kyuubi.operation.{FetchOrientation, KyuubiOperation, OperationHandle}
 import org.apache.kyuubi.server.api.{ApiRequestContext, ApiUtils}
+import org.apache.kyuubi.shaded.hive.service.rpc.thrift._
 
 @Tag(name = "Operation")
 @Produces(Array(MediaType.APPLICATION_JSON))
@@ -54,7 +53,7 @@ private[v1] class OperationsResource extends ApiRequestContext with Logging {
     try {
       val opHandle = OperationHandle(operationHandleStr)
       val operation = fe.be.sessionManager.operationManager.getOperation(opHandle)
-      KyuubiOperationEvent(operation.asInstanceOf[KyuubiOperation])
+      ApiUtils.operationEvent(operation.asInstanceOf[KyuubiOperation])
     } catch {
       case NonFatal(e) =>
         val errorMsg = "Error getting an operation event"
@@ -150,7 +149,11 @@ private[v1] class OperationsResource extends ApiRequestContext with Logging {
         FetchOrientation.withName(fetchOrientation),
         maxRows)
       val rowSet = fetchResultsResp.getResults
-      val logRowSet = rowSet.getColumns.get(0).getStringVal.getValues.asScala
+      val logRowSet = if (rowSet.getColumns != null) {
+        rowSet.getColumns.get(0).getStringVal.getValues.asScala
+      } else {
+        Seq.empty
+      }
       new OperationLog(logRowSet.asJava, logRowSet.size)
     } catch {
       case e: BadRequestException =>

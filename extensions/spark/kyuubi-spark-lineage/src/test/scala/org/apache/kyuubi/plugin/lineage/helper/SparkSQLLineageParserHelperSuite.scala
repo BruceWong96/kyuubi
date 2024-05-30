@@ -472,32 +472,36 @@ class SparkSQLLineageParserHelperSuite extends KyuubiFunSuite
     val tableDirectory = getClass.getResource("/").getPath + "table_directory"
     val directory = File(tableDirectory).createDirectory()
     val ret0 = extractLineage(s"""
-                                 |INSERT OVERWRITE DIRECTORY '$directory.path'
+                                 |INSERT OVERWRITE DIRECTORY '${directory.path}'
                                  |USING parquet
                                  |SELECT * FROM test_db0.test_table_part0""".stripMargin)
     assert(ret0 == Lineage(
       List(s"$DEFAULT_CATALOG.test_db0.test_table_part0"),
-      List(s"""`$directory.path`"""),
+      List(s"""`${directory.path}`"""),
       List(
-        (s"""`$directory.path`.key""", Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.key")),
-        (s"""`$directory.path`.value""", Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.value")),
-        (s"""`$directory.path`.pid""", Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.pid")))))
+        (s"""`${directory.path}`.key""", Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.key")),
+        (
+          s"""`${directory.path}`.value""",
+          Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.value")),
+        (s"""`${directory.path}`.pid""", Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.pid")))))
   }
 
   test("columns lineage extract - InsertIntoHiveDirCommand") {
     val tableDirectory = getClass.getResource("/").getPath + "table_directory"
     val directory = File(tableDirectory).createDirectory()
     val ret0 = extractLineage(s"""
-                                 |INSERT OVERWRITE DIRECTORY '$directory.path'
+                                 |INSERT OVERWRITE DIRECTORY '${directory.path}'
                                  |USING parquet
                                  |SELECT * FROM test_db0.test_table_part0""".stripMargin)
     assert(ret0 == Lineage(
       List(s"$DEFAULT_CATALOG.test_db0.test_table_part0"),
-      List(s"""`$directory.path`"""),
+      List(s"""`${directory.path}`"""),
       List(
-        (s"""`$directory.path`.key""", Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.key")),
-        (s"""`$directory.path`.value""", Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.value")),
-        (s"""`$directory.path`.pid""", Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.pid")))))
+        (s"""`${directory.path}`.key""", Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.key")),
+        (
+          s"""`${directory.path}`.value""",
+          Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.value")),
+        (s"""`${directory.path}`.pid""", Set(s"$DEFAULT_CATALOG.test_db0.test_table_part0.pid")))))
   }
 
   test("columns lineage extract - InsertIntoHiveTable") {
@@ -1233,7 +1237,7 @@ class SparkSQLLineageParserHelperSuite extends KyuubiFunSuite
       val ret2 =
         extractLineage(
           s"insert into table v2_catalog.db.t1 select a," +
-            s"count(distinct(b+c))," +
+            s"count(distinct(cast(b as int)+cast(c as int)))," +
             s"count(distinct(b)) * count(distinct(c))" +
             s"from v2_catalog.db.t2 group by a")
       assert(ret2 == Lineage(

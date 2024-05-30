@@ -16,15 +16,15 @@
  */
 package org.apache.kyuubi.engine.jdbc.operation
 
-import org.apache.hive.service.rpc.thrift.{TFetchResultsResp, TGetResultSetMetadataResp, TRowSet}
-
 import org.apache.kyuubi.{KyuubiSQLException, Utils}
 import org.apache.kyuubi.config.KyuubiConf
 import org.apache.kyuubi.engine.jdbc.dialect.{JdbcDialect, JdbcDialects}
 import org.apache.kyuubi.engine.jdbc.schema.{Row, Schema}
+import org.apache.kyuubi.engine.jdbc.session.JdbcSessionImpl
 import org.apache.kyuubi.operation.{AbstractOperation, FetchIterator, OperationState}
 import org.apache.kyuubi.operation.FetchOrientation.{FETCH_FIRST, FETCH_NEXT, FETCH_PRIOR, FetchOrientation}
 import org.apache.kyuubi.session.Session
+import org.apache.kyuubi.shaded.hive.service.rpc.thrift.{TFetchResultsResp, TGetResultSetMetadataResp, TRowSet}
 
 abstract class JdbcOperation(session: Session) extends AbstractOperation(session) {
 
@@ -32,7 +32,7 @@ abstract class JdbcOperation(session: Session) extends AbstractOperation(session
 
   protected var iter: FetchIterator[Row] = _
 
-  protected lazy val conf: KyuubiConf = session.sessionManager.getConf
+  protected lazy val conf: KyuubiConf = session.asInstanceOf[JdbcSessionImpl].sessionConf
 
   protected lazy val dialect: JdbcDialect = JdbcDialects.get(conf)
 
@@ -101,11 +101,8 @@ abstract class JdbcOperation(session: Session) extends AbstractOperation(session
   override protected def afterRun(): Unit = {}
 
   protected def toTRowSet(taken: Iterator[Row]): TRowSet = {
-    val rowSetHelper = dialect.getRowSetHelper()
-    rowSetHelper.toTRowSet(
-      taken.toList.map(_.values),
-      schema.columns,
-      getProtocolVersion)
+    dialect.getTRowSetGenerator()
+      .toTRowSet(taken.toSeq.map(_.values), schema.columns, getProtocolVersion)
   }
 
   override def getResultSetMetadata: TGetResultSetMetadataResp = {

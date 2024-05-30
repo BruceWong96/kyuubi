@@ -16,18 +16,17 @@
 #
 
 #
-# This is a dedicated issue template for 2023 Kyuubi Code Contribution Program, all proposed
-# tasks will be listed at https://github.com/orgs/apache/projects/296 after approval
+# This is a dedicated issue template for 2024H1 Kyuubi Code Contribution Program, all proposed
+# tasks will be listed at https://github.com/orgs/apache/projects/343 after approval
 #
-name: 2023 Kyuubi Code Contribution Task
+name: 2024H1 Kyuubi Code Contribution Task
 title: "[TASK][<LEVEL>] <The Task Title>"
-description: Propose a task for 2023 Kyuubi Code Contribution Program
-labels: [ "hacktoberfest" ]
+description: Propose a task for 2024H1 Kyuubi Code Contribution Program
 body:
   - type: markdown
     attributes:
       value: |
-        You are very welcome to propose new task for 2023 Kyuubi Code Contribution Program.
+        You are very welcome to propose new task for 2024H1 Kyuubi Code Contribution Program.
         Your brilliant ideas keep Apache Kyuubi evolving.
         Please replace the placeholder `<LEVEL>` in the issue title with one of the following options:
         - TRIVIAL - it's usually for new contributors to learn the contributor process, e.g. how to cut branch,
@@ -68,7 +67,7 @@ body:
       label: Search before creating
       options:
         - label: >
-            I have searched in the [task list](https://github.com/orgs/apache/projects/296) and found no similar
+            I have searched in the [task list](https://github.com/orgs/apache/projects/343) and found no similar
             tasks.
           required: true
 
@@ -120,7 +119,7 @@ body:
       label: Additional context
       description: Anything else that related to this task that the contributors need to know.
       value: |
-        Introduction of [2023 Kyuubi Code Contribution Program](https://github.com/apache/kyuubi/issues/5357)
+        Introduction of [2024H1 Kyuubi Code Contribution Program](https://github.com/apache/kyuubi/issues/6232)
     validations:
       required: false
 

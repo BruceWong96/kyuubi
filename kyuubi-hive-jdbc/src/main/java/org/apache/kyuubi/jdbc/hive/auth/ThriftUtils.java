@@ -19,10 +19,11 @@ package org.apache.kyuubi.jdbc.hive.auth;
 
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
-import org.apache.thrift.transport.TSSLTransportFactory;
-import org.apache.thrift.transport.TSocket;
-import org.apache.thrift.transport.TTransport;
-import org.apache.thrift.transport.TTransportException;
+import org.apache.kyuubi.shaded.thrift.TConfiguration;
+import org.apache.kyuubi.shaded.thrift.transport.TSSLTransportFactory;
+import org.apache.kyuubi.shaded.thrift.transport.TSocket;
+import org.apache.kyuubi.shaded.thrift.transport.TTransport;
+import org.apache.kyuubi.shaded.thrift.transport.TTransportException;
 
 /**
  * This class helps in some aspects of authentication. It creates the proper Thrift classes for the
@@ -30,8 +31,8 @@ import org.apache.thrift.transport.TTransportException;
  */
 public class ThriftUtils {
   public static TTransport getSocketTransport(
-      String host, int port, int connectTimeout, int socketTimeout) {
-    return new TSocket(host, port, socketTimeout, connectTimeout);
+      String host, int port, int connectTimeout, int socketTimeout) throws TTransportException {
+    return new TSocket(TConfiguration.DEFAULT, host, port, socketTimeout, connectTimeout);
   }
 
   public static TTransport getSSLSocket(

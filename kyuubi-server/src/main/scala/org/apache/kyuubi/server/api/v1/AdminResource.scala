@@ -143,13 +143,34 @@ private[v1] class AdminResource extends ApiRequestContext with Logging {
 
   @ApiResponse(
     responseCode = "200",
+    content = Array(new Content(mediaType = MediaType.APPLICATION_JSON)),
+    description = "refresh the deny ips")
+  @POST
+  @Path("refresh/deny_ips")
+  def refreshDenyIp(): Response = {
+    val userName = fe.getSessionUser(Map.empty[String, String])
+    val ipAddress = fe.getIpAddress
+    info(s"Receive refresh deny ips request from $userName/$ipAddress")
+    if (!fe.isAdministrator(userName)) {
+      throw new NotAllowedException(
+        s"$userName is not allowed to refresh the deny ips")
+    }
+    info(s"Reloading deny ips")
+    KyuubiServer.refreshDenyIps()
+    Response.ok(s"Refresh the deny ips successfully.").build()
+  }
+
+  @ApiResponse(
+    responseCode = "200",
     content = Array(new Content(
       mediaType = MediaType.APPLICATION_JSON,
       array = new ArraySchema(schema = new Schema(implementation = classOf[SessionData])))),
     description = "get the list of all live sessions")
   @GET
   @Path("sessions")
-  def sessions(@QueryParam("users") users: String): Seq[SessionData] = {
+  def sessions(
+      @QueryParam("users") users: String,
+      @QueryParam("sessionType") sessionType: String): Seq[SessionData] = {
     val userName = fe.getSessionUser(Map.empty[String, String])
     val ipAddress = fe.getIpAddress
     info(s"Received listing all live sessions request from $userName/$ipAddress")
@@ -158,6 +179,10 @@ private[v1] class AdminResource extends ApiRequestContext with Logging {
         s"$userName is not allowed to list all live sessions")
     }
     var sessions = fe.be.sessionManager.allSessions()
+    if (StringUtils.isNoneBlank(sessionType)) {
+      sessions = sessions.filter(session =>
+        sessionType.equals(session.asInstanceOf[KyuubiSession].sessionType.toString))
+    }
     if (StringUtils.isNotBlank(users)) {
       val usersSet = users.split(",").toSet
       sessions = sessions.filter(session => usersSet.contains(session.user))
@@ -195,7 +220,8 @@ private[v1] class AdminResource extends ApiRequestContext with Logging {
   @Path("operations")
   def listOperations(
       @QueryParam("users") users: String,
-      @QueryParam("sessionHandle") sessionHandle: String): Seq[OperationData] = {
+      @QueryParam("sessionHandle") sessionHandle: String,
+      @QueryParam("sessionType") sessionType: String): Seq[OperationData] = {
     val userName = fe.getSessionUser(Map.empty[String, String])
     val ipAddress = fe.getIpAddress
     info(s"Received listing all of the active operations request from $userName/$ipAddress")
@@ -211,6 +237,11 @@ private[v1] class AdminResource extends ApiRequestContext with Logging {
     if (StringUtils.isNotBlank(sessionHandle)) {
       operations = operations.filter(operation =>
         operation.getSession.handle.equals(SessionHandle.fromUUID(sessionHandle)))
+    }
+    if (StringUtils.isNotBlank(sessionType)) {
+      operations = operations.filter(operation =>
+        sessionType.equalsIgnoreCase(
+          operation.getSession.asInstanceOf[KyuubiSession].sessionType.toString))
     }
     operations
       .map(operation => ApiUtils.operationData(operation.asInstanceOf[KyuubiOperation])).toSeq

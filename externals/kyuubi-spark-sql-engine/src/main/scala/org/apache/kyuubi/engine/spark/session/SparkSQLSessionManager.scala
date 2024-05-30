@@ -17,21 +17,27 @@
 
 package org.apache.kyuubi.engine.spark.session
 
+import java.nio.file.Paths
 import java.util.concurrent.{ScheduledExecutorService, TimeUnit}
 
-import org.apache.hive.service.rpc.thrift.TProtocolVersion
+import org.apache.hadoop.fs.Path
 import org.apache.spark.api.python.KyuubiPythonGatewayServer
 import org.apache.spark.sql.SparkSession
 
 import org.apache.kyuubi.KyuubiSQLException
+import org.apache.kyuubi.config.KyuubiConf
 import org.apache.kyuubi.config.KyuubiConf._
 import org.apache.kyuubi.config.KyuubiReservedKeys.KYUUBI_SESSION_HANDLE_KEY
 import org.apache.kyuubi.engine.ShareLevel
 import org.apache.kyuubi.engine.ShareLevel._
 import org.apache.kyuubi.engine.spark.{KyuubiSparkUtil, SparkSQLEngine}
+import org.apache.kyuubi.engine.spark.KyuubiSparkUtil.{engineId, getSessionConf}
 import org.apache.kyuubi.engine.spark.operation.SparkSQLOperationManager
+import org.apache.kyuubi.operation.OperationHandle
 import org.apache.kyuubi.session._
+import org.apache.kyuubi.shaded.hive.service.rpc.thrift.TProtocolVersion
 import org.apache.kyuubi.util.ThreadUtils
+import org.apache.kyuubi.util.ThreadUtils.scheduleTolerableRunnableWithFixedDelay
 
 /**
  * A [[SessionManager]] constructed with [[SparkSession]] which give it the ability to talk with
@@ -66,8 +72,9 @@ class SparkSQLSessionManager private (name: String, spark: SparkSession)
     if (!userIsolatedSparkSession) {
       userIsolatedSparkSessionThread =
         Some(ThreadUtils.newDaemonSingleThreadScheduledExecutor("user-isolated-cache-checker"))
-      userIsolatedSparkSessionThread.foreach {
-        _.scheduleWithFixedDelay(
+      userIsolatedSparkSessionThread.foreach { thread =>
+        scheduleTolerableRunnableWithFixedDelay(
+          thread,
           () => {
             userIsolatedCacheLock.synchronized {
               val iter = userIsolatedCacheCount.entrySet().iterator()
@@ -128,7 +135,9 @@ class SparkSQLSessionManager private (name: String, spark: SparkSession)
 
   private def newSparkSession(rootSparkSession: SparkSession): SparkSession = {
     val newSparkSession = rootSparkSession.newSession()
-    KyuubiSparkUtil.initializeSparkSession(newSparkSession, conf.get(ENGINE_SESSION_INITIALIZE_SQL))
+    KyuubiSparkUtil.initializeSparkSession(
+      newSparkSession,
+      conf.get(ENGINE_SESSION_SPARK_INITIALIZE_SQL))
     newSparkSession
   }
 
@@ -175,16 +184,44 @@ class SparkSQLSessionManager private (name: String, spark: SparkSession)
     } catch {
       case e: KyuubiSQLException =>
         warn(s"Error closing session ${sessionHandle}", e)
+    } finally {
+      if (getSessionConf(KyuubiConf.OPERATION_RESULT_SAVE_TO_FILE, spark)) {
+        val sessionSavePath = getSessionResultSavePath(sessionHandle)
+        try {
+          val path = new Path(sessionSavePath)
+          val fs = path.getFileSystem(spark.sparkContext.hadoopConfiguration)
+          if (fs.exists(path)) {
+            fs.delete(path, true)
+            info(s"Deleted session result path: $sessionSavePath")
+          }
+        } catch {
+          case e: Throwable => error(s"Error cleaning session result path: $sessionSavePath", e)
+        }
+      }
     }
     if (shareLevel == ShareLevel.CONNECTION) {
-      info("Session stopped due to shared level is Connection.")
-      stopSession()
+      info("Spark engine stopped due to session stopped and shared level is CONNECTION.")
+      stopEngine()
     }
   }
 
-  private def stopSession(): Unit = {
+  private def stopEngine(): Unit = {
     SparkSQLEngine.currentEngine.foreach(_.stop())
   }
 
   override protected def isServer: Boolean = false
+
+  private[spark] def getEngineResultSavePath(): String = {
+    Paths.get(conf.get(OPERATION_RESULT_SAVE_TO_FILE_DIR), engineId).toString
+  }
+
+  private def getSessionResultSavePath(sessionHandle: SessionHandle): String = {
+    Paths.get(getEngineResultSavePath(), sessionHandle.identifier.toString).toString
+  }
+
+  private[spark] def getOperationResultSavePath(
+      sessionHandle: SessionHandle,
+      opHandle: OperationHandle): String = {
+    Paths.get(getSessionResultSavePath(sessionHandle), opHandle.identifier.toString).toString
+  }
 }

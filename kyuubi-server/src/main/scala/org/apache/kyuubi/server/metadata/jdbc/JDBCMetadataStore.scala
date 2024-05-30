@@ -55,16 +55,16 @@ class JDBCMetadataStore(conf: KyuubiConf) extends MetadataStore with Logging {
     }
   private val driverClass = dbType match {
     case SQLITE => driverClassOpt.getOrElse("org.sqlite.JDBC")
-    case DERBY => driverClassOpt.getOrElse("org.apache.derby.jdbc.AutoloadedDriver")
     case MYSQL => driverClassOpt.getOrElse(mysqlDriverClass)
+    case POSTGRESQL => driverClassOpt.getOrElse("org.postgresql.Driver")
     case CUSTOM => driverClassOpt.getOrElse(
         throw new IllegalArgumentException("No jdbc driver defined"))
   }
 
   private val dialect = dbType match {
-    case DERBY => new DerbyDatabaseDialect
     case SQLITE => new SQLiteDatabaseDialect
     case MYSQL => new MySQLDatabaseDialect
+    case POSTGRESQL => new PostgreSQLDatabaseDialect
     case CUSTOM => new GenericDatabaseDialect
   }
 
@@ -74,7 +74,7 @@ class JDBCMetadataStore(conf: KyuubiConf) extends MetadataStore with Logging {
     JDBCMetadataStoreConf.getMetadataStoreJDBCDataSourceProperties(conf)
   private val hikariConfig = new HikariConfig(datasourceProperties)
   hikariConfig.setDriverClassName(driverClass)
-  hikariConfig.setJdbcUrl(conf.get(METADATA_STORE_JDBC_URL))
+  hikariConfig.setJdbcUrl(getMetadataStoreJdbcUrl(conf))
   hikariConfig.setUsername(conf.get(METADATA_STORE_JDBC_USER))
   hikariConfig.setPassword(conf.get(METADATA_STORE_JDBC_PASSWORD))
   hikariConfig.setPoolName("jdbc-metadata-store-pool")
@@ -432,6 +432,7 @@ class JDBCMetadataStore(conf: KyuubiConf) extends MetadataStore with Logging {
         val createTime = resultSet.getLong("create_time")
         val engineType = resultSet.getString("engine_type")
         val clusterManager = Option(resultSet.getString("cluster_manager"))
+        val engineOpenTime = resultSet.getLong("engine_open_time")
         val engineId = resultSet.getString("engine_id")
         val engineName = resultSet.getString("engine_name")
         val engineUrl = resultSet.getString("engine_url")
@@ -456,6 +457,7 @@ class JDBCMetadataStore(conf: KyuubiConf) extends MetadataStore with Logging {
           createTime = createTime,
           engineType = engineType,
           clusterManager = clusterManager,
+          engineOpenTime = engineOpenTime,
           engineId = engineId,
           engineName = engineName,
           engineUrl = engineUrl,
@@ -594,6 +596,7 @@ object JDBCMetadataStore {
     "create_time",
     "engine_type",
     "cluster_manager",
+    "engine_open_time",
     "engine_id",
     "engine_name",
     "engine_url",

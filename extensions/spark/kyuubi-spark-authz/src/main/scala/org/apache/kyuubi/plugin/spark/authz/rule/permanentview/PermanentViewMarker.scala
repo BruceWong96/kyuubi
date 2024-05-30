@@ -17,22 +17,42 @@
 
 package org.apache.kyuubi.plugin.spark.authz.rule.permanentview
 
+import org.apache.spark.sql.catalyst.analysis.MultiInstanceRelation
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
-import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, UnaryNode}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, Cast}
+import org.apache.spark.sql.catalyst.plans.QueryPlan
+import org.apache.spark.sql.catalyst.plans.logical.{LeafNode, LogicalPlan, Project, Statistics, View}
+import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 
-import org.apache.kyuubi.plugin.spark.authz.util.WithInternalChild
+case class PermanentViewMarker(child: LogicalPlan, catalogTable: CatalogTable)
+  extends LeafNode with MultiInstanceRelation {
 
-case class PermanentViewMarker(
-    child: LogicalPlan,
-    catalogTable: CatalogTable,
-    outputColNames: Seq[String],
-    isSubqueryExpressionPlaceHolder: Boolean = false) extends UnaryNode
-  with WithInternalChild {
+  private val PVM_NEW_INSTANCE_TAG = TreeNodeTag[Unit]("__PVM_NEW_INSTANCE_TAG")
 
   override def output: Seq[Attribute] = child.output
 
-  override def withNewChildInternal(newChild: LogicalPlan): LogicalPlan =
-    copy(child = newChild)
+  override def argString(maxFields: Int): String = ""
 
+  override def innerChildren: Seq[QueryPlan[_]] = child :: Nil
+
+  override def computeStats(): Statistics = child.stats
+
+  override def newInstance(): LogicalPlan = {
+    val projectList = child.output.map { case attr =>
+      Alias(Cast(attr, attr.dataType), attr.name)(explicitMetadata = Some(attr.metadata))
+    }
+    val newProj = Project(projectList, child)
+    newProj.setTagValue(PVM_NEW_INSTANCE_TAG, ())
+
+    this.copy(child = newProj, catalogTable = catalogTable)
+  }
+
+  override def doCanonicalize(): LogicalPlan = {
+    child match {
+      case p @ Project(_, view: View) if p.getTagValue(PVM_NEW_INSTANCE_TAG).contains(true) =>
+        view.canonicalized
+      case _ =>
+        child.canonicalized
+    }
+  }
 }

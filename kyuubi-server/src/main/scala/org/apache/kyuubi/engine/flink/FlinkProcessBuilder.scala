@@ -20,32 +20,33 @@ package org.apache.kyuubi.engine.flink
 import java.io.{File, FilenameFilter}
 import java.nio.file.{Files, Paths}
 
-import scala.collection.JavaConverters._
-import scala.collection.mutable.{ArrayBuffer, ListBuffer}
+import scala.collection.mutable
 
 import com.google.common.annotations.VisibleForTesting
 
 import org.apache.kyuubi._
-import org.apache.kyuubi.config.{KyuubiConf, KyuubiReservedKeys}
+import org.apache.kyuubi.config.KyuubiConf
 import org.apache.kyuubi.config.KyuubiConf._
 import org.apache.kyuubi.config.KyuubiReservedKeys.KYUUBI_SESSION_USER_KEY
 import org.apache.kyuubi.engine.{ApplicationManagerInfo, KyuubiApplicationManager, ProcBuilder}
 import org.apache.kyuubi.engine.flink.FlinkProcessBuilder._
 import org.apache.kyuubi.operation.log.OperationLog
+import org.apache.kyuubi.util.command.CommandLineUtils._
 
 /**
  * A builder to build flink sql engine progress.
  */
 class FlinkProcessBuilder(
     override val proxyUser: String,
+    override val doAsEnabled: Boolean,
     override val conf: KyuubiConf,
     val engineRefId: String,
     val extraEngineLog: Option[OperationLog] = None)
   extends ProcBuilder with Logging {
 
   @VisibleForTesting
-  def this(proxyUser: String, conf: KyuubiConf) {
-    this(proxyUser, conf, "")
+  def this(proxyUser: String, doAsEnabled: Boolean, conf: KyuubiConf) {
+    this(proxyUser, doAsEnabled, conf, "")
   }
 
   val flinkHome: String = getEngineHome(shortName)
@@ -77,18 +78,16 @@ class FlinkProcessBuilder(
     ApplicationManagerInfo(clusterManager())
   }
 
-  override protected val commands: Array[String] = {
+  override protected val commands: Iterable[String] = {
     KyuubiApplicationManager.tagApplication(engineRefId, shortName, clusterManager(), conf)
-    // unset engine credentials because Flink doesn't support them at the moment
-    conf.unset(KyuubiReservedKeys.KYUUBI_ENGINE_CREDENTIALS_KEY)
     // flink.execution.target are required in Kyuubi conf currently
     executionTarget match {
       case Some("yarn-application") =>
-        val buffer = new ArrayBuffer[String]()
+        val buffer = new mutable.ListBuffer[String]()
         buffer += flinkExecutable
         buffer += "run-application"
 
-        val flinkExtraJars = new ListBuffer[String]
+        val flinkExtraJars = new mutable.ListBuffer[String]
         // locate flink sql jars
         val flinkSqlJars = Paths.get(flinkHome)
           .resolve("opt")
@@ -114,10 +113,15 @@ class FlinkProcessBuilder(
           flinkExtraJars += s"$hiveConfFile"
         }
 
+        val customFlinkConf = conf.getAllWithPrefix(FLINK_CONF_PREFIX, "")
+        // add custom yarn.ship-files
+        flinkExtraJars ++= customFlinkConf.get(YARN_SHIP_FILES_KEY)
+        val yarnAppName = customFlinkConf.get(YARN_APPLICATION_NAME_KEY)
+          .orElse(conf.getOption(APP_KEY))
         buffer += "-t"
         buffer += "yarn-application"
         buffer += s"-Dyarn.ship-files=${flinkExtraJars.mkString(";")}"
-        buffer += s"-Dyarn.application.name=${conf.getOption(APP_KEY).get}"
+        buffer += s"-Dyarn.application.name=${yarnAppName.get}"
         buffer += s"-Dyarn.tags=${conf.getOption(YARN_TAG_KEY).get}"
         buffer += "-Dcontainerized.master.env.FLINK_CONF_DIR=."
 
@@ -125,8 +129,10 @@ class FlinkProcessBuilder(
           buffer += "-Dcontainerized.master.env.HIVE_CONF_DIR=."
         }
 
-        val customFlinkConf = conf.getAllWithPrefix("flink", "")
-        customFlinkConf.filter(_._1 != "app.name").foreach { case (k, v) =>
+        customFlinkConf.filter { case (k, _) =>
+          !Seq("app.name", YARN_SHIP_FILES_KEY, YARN_APPLICATION_NAME_KEY, YARN_TAG_KEY)
+            .contains(k)
+        }.foreach { case (k, v) =>
           buffer += s"-D$k=$v"
         }
 
@@ -134,19 +140,14 @@ class FlinkProcessBuilder(
         buffer += s"$mainClass"
         buffer += s"${mainResource.get}"
 
-        buffer += "--conf"
-        buffer += s"$KYUUBI_SESSION_USER_KEY=$proxyUser"
-        conf.getAll.foreach { case (k, v) =>
-          if (k.startsWith("kyuubi.")) {
-            buffer += "--conf"
-            buffer += s"$k=$v"
-          }
-        }
+        buffer ++= confKeyValue(KYUUBI_SESSION_USER_KEY, proxyUser)
 
-        buffer.toArray
+        buffer ++= confKeyValues(conf.getAll.filter(_._1.startsWith("kyuubi.")))
+
+        buffer
 
       case _ =>
-        val buffer = new ArrayBuffer[String]()
+        val buffer = new mutable.ListBuffer[String]()
         buffer += executable
 
         val memory = conf.get(ENGINE_FLINK_MEMORY)
@@ -156,8 +157,7 @@ class FlinkProcessBuilder(
           buffer += javaOptions.get
         }
 
-        buffer += "-cp"
-        val classpathEntries = new java.util.LinkedHashSet[String]
+        val classpathEntries = new mutable.LinkedHashSet[String]
         // flink engine runtime jar
         mainResource.foreach(classpathEntries.add)
         // flink sql jars
@@ -201,17 +201,15 @@ class FlinkProcessBuilder(
             classpathEntries.add(s"$devHadoopJars${File.separator}*")
           }
         }
-        buffer += classpathEntries.asScala.mkString(File.pathSeparator)
+        buffer ++= genClasspathOption(classpathEntries)
+
         buffer += mainClass
 
-        buffer += "--conf"
-        buffer += s"$KYUUBI_SESSION_USER_KEY=$proxyUser"
+        buffer ++= confKeyValue(KYUUBI_SESSION_USER_KEY, proxyUser)
 
-        conf.getAll.foreach { case (k, v) =>
-          buffer += "--conf"
-          buffer += s"$k=$v"
-        }
-        buffer.toArray
+        buffer ++= confKeyValues(conf.getAll)
+
+        buffer
     }
   }
 
@@ -220,8 +218,12 @@ class FlinkProcessBuilder(
 
 object FlinkProcessBuilder {
   final val FLINK_EXEC_FILE = "flink"
+  final val FLINK_CONF_PREFIX = "flink"
   final val APP_KEY = "flink.app.name"
   final val YARN_TAG_KEY = "yarn.tags"
+  final val YARN_SHIP_FILES_KEY = "yarn.ship-files"
+  final val YARN_APPLICATION_NAME_KEY = "yarn.application.name"
+
   final val FLINK_HADOOP_CLASSPATH_KEY = "FLINK_HADOOP_CLASSPATH"
   final val FLINK_PROXY_USER_KEY = "HADOOP_PROXY_USER"
 }

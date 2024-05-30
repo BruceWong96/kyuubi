@@ -26,11 +26,6 @@ import javax.ws.rs.core.NewCookie
 
 import scala.collection.mutable
 
-import org.apache.hadoop.hive.shims.Utils
-import org.apache.thrift.TProcessor
-import org.apache.thrift.protocol.TProtocolFactory
-import org.apache.thrift.server.TServlet
-
 import org.apache.kyuubi.Logging
 import org.apache.kyuubi.config.KyuubiConf
 import org.apache.kyuubi.config.KyuubiConf.FRONTEND_PROXY_HTTP_CLIENT_IP_HEADER
@@ -38,6 +33,9 @@ import org.apache.kyuubi.server.http.authentication.AuthenticationFilter
 import org.apache.kyuubi.server.http.util.{CookieSigner, HttpAuthUtils, SessionManager}
 import org.apache.kyuubi.server.http.util.HttpAuthUtils.AUTHORIZATION_HEADER
 import org.apache.kyuubi.service.authentication.KyuubiAuthenticationFactory
+import org.apache.kyuubi.shaded.thrift.TProcessor
+import org.apache.kyuubi.shaded.thrift.protocol.TProtocolFactory
+import org.apache.kyuubi.shaded.thrift.server.TServlet
 
 class ThriftHttpServlet(
     processor: TProcessor,
@@ -57,6 +55,8 @@ class ThriftHttpServlet(
   private var isHttpOnlyCookie = false
   private val X_FORWARDED_FOR_HEADER = "X-Forwarded-For"
   private val authenticationFilter = new AuthenticationFilter(conf)
+  private val XSRF_HEADER_DEFAULT = "X-XSRF-HEADER"
+  private val XSRF_METHODS_TO_IGNORE_DEFAULT = Set("GET", "OPTIONS", "HEAD", "TRACE")
 
   override def init(): Unit = {
     isCookieAuthEnabled = conf.get(KyuubiConf.FRONTEND_THRIFT_HTTP_COOKIE_AUTH_ENABLED)
@@ -82,7 +82,7 @@ class ThriftHttpServlet(
     var requireNewCookie: Boolean = false
     try {
       if (conf.get(KyuubiConf.FRONTEND_THRIFT_HTTP_XSRF_FILTER_ENABLED)) {
-        val continueProcessing = Utils.doXsrfFilter(request, response, null, null)
+        val continueProcessing = doXsrfFilter(request, response)
         if (!continueProcessing) {
           warn("Request did not have valid XSRF header, rejecting.")
           return
@@ -136,7 +136,7 @@ class ThriftHttpServlet(
       } else SessionManager.setForwardedAddresses(List.empty[String])
 
       // Generate new cookie and add it to the response
-      if (requireNewCookie && !authFactory.noSaslEnabled) {
+      if (requireNewCookie && !authFactory.saslDisabled) {
         val cookieToken = HttpAuthUtils.createCookieToken(clientUserName)
         val hs2Cookie = createCookie(signer.signCookie(cookieToken))
         if (isHttpOnlyCookie) response.setHeader("SET-COOKIE", getHttpOnlyCookieHeader(hs2Cookie))
@@ -302,5 +302,23 @@ class ThriftHttpServlet(
     })
 
     null
+  }
+
+  private def doXsrfFilter(
+      httpRequest: HttpServletRequest,
+      response: HttpServletResponse): Boolean = {
+    if (XSRF_METHODS_TO_IGNORE_DEFAULT.contains(httpRequest.getMethod)
+      || httpRequest.getHeader(XSRF_HEADER_DEFAULT) != null) {
+      true
+    } else {
+      response.sendError(
+        HttpServletResponse.SC_BAD_REQUEST,
+        "Missing Required Header for Vulnerability Protection")
+      // scalastyle:off println
+      response.getWriter.println(
+        "XSRF filter denial, requests must contain header : " + XSRF_HEADER_DEFAULT)
+      // scalastyle:on println
+      false
+    }
   }
 }

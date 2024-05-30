@@ -31,8 +31,8 @@ import org.apache.flink.table.gateway.service.context.DefaultContext
 
 import org.apache.kyuubi.{Logging, Utils}
 import org.apache.kyuubi.Utils.{addShutdownHook, currentUser, FLINK_ENGINE_SHUTDOWN_PRIORITY}
-import org.apache.kyuubi.config.KyuubiConf
-import org.apache.kyuubi.config.KyuubiConf.ENGINE_INITIALIZE_SQL
+import org.apache.kyuubi.config.{KyuubiConf, KyuubiReservedKeys}
+import org.apache.kyuubi.config.KyuubiConf.ENGINE_FLINK_INITIALIZE_SQL
 import org.apache.kyuubi.config.KyuubiReservedKeys.{KYUUBI_ENGINE_NAME, KYUUBI_SESSION_USER_KEY}
 import org.apache.kyuubi.engine.flink.FlinkSQLEngine.{countDownLatch, currentEngine}
 import org.apache.kyuubi.service.Serverable
@@ -99,6 +99,12 @@ object FlinkSQLEngine extends Logging {
 
       kyuubiConf.setIfMissing(KyuubiConf.FRONTEND_THRIFT_BINARY_BIND_PORT, 0)
 
+      val engineCredentials = kyuubiConf.getOption(KyuubiReservedKeys.KYUUBI_ENGINE_CREDENTIALS_KEY)
+      kyuubiConf.unset(KyuubiReservedKeys.KYUUBI_ENGINE_CREDENTIALS_KEY)
+      engineCredentials.filter(_.nonEmpty).foreach { credentials =>
+        FlinkTBinaryFrontendService.renewDelegationToken(credentials)
+      }
+
       val engineContext = FlinkEngineUtils.getDefaultContext(args, flinkConf, flinkConfDir)
       startEngine(engineContext)
       info("Flink engine started")
@@ -139,7 +145,7 @@ object FlinkSQLEngine extends Logging {
       tableEnv.executeSql("select 'kyuubi'").await()
     }
 
-    kyuubiConf.get(ENGINE_INITIALIZE_SQL).foreach { stmt =>
+    kyuubiConf.get(ENGINE_FLINK_INITIALIZE_SQL).foreach { stmt =>
       tableEnv.executeSql(stmt).await()
     }
 

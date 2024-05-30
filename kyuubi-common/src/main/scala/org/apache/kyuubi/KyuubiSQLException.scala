@@ -23,9 +23,8 @@ import java.sql.SQLException
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 
-import org.apache.hive.service.rpc.thrift.{TStatus, TStatusCode}
-
 import org.apache.kyuubi.Utils.stringifyException
+import org.apache.kyuubi.shaded.hive.service.rpc.thrift.{TStatus, TStatusCode}
 import org.apache.kyuubi.util.reflect.DynConstructors
 
 /**
@@ -83,8 +82,8 @@ object KyuubiSQLException {
     }
   }
 
-  def featureNotSupported(): KyuubiSQLException = {
-    KyuubiSQLException("feature not supported", sqlState = "0A000")
+  def featureNotSupported(message: String = "feature not supported"): KyuubiSQLException = {
+    KyuubiSQLException(message, sqlState = "0A000")
   }
 
   def connectionDoesNotExist(): KyuubiSQLException = {

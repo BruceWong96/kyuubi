@@ -17,8 +17,7 @@
 
 package org.apache.kyuubi.plugin.spark.authz.serde
 
-import java.util.{Map => JMap}
-import java.util.LinkedHashMap
+import java.util.{LinkedHashMap, Map => JMap}
 
 import scala.collection.JavaConverters._
 
@@ -28,6 +27,7 @@ import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, SubqueryAlias}
 import org.apache.spark.sql.connector.catalog.Identifier
+import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -80,14 +80,18 @@ object TableExtractor {
 class TableIdentifierTableExtractor extends TableExtractor {
   override def apply(spark: SparkSession, v1: AnyRef): Option[Table] = {
     val identifier = v1.asInstanceOf[TableIdentifier]
-    val owner =
-      try {
-        val catalogTable = spark.sessionState.catalog.getTableMetadata(identifier)
-        Option(catalogTable.owner).filter(_.nonEmpty)
-      } catch {
-        case _: Exception => None
-      }
-    Some(Table(None, identifier.database, identifier.table, owner))
+    if (isPathIdentifier(identifier.table, spark)) {
+      None
+    } else {
+      val owner =
+        try {
+          val catalogTable = spark.sessionState.catalog.getTableMetadata(identifier)
+          Option(catalogTable.owner).filter(_.nonEmpty)
+        } catch {
+          case _: Exception => None
+        }
+      Some(Table(None, identifier.database, identifier.table, owner))
+    }
   }
 }
 
@@ -186,18 +190,18 @@ class ExpressionSeqTableExtractor extends TableExtractor {
 class DataSourceV2RelationTableExtractor extends TableExtractor {
   override def apply(spark: SparkSession, v1: AnyRef): Option[Table] = {
     val plan = v1.asInstanceOf[LogicalPlan]
-    val maybeV2Relation = plan.find(_.getClass.getSimpleName == "DataSourceV2Relation")
-    maybeV2Relation match {
-      case None => None
-      case Some(v2Relation) =>
-        val maybeCatalogPlugin = invokeAs[Option[AnyRef]](v2Relation, "catalog")
-        val maybeCatalog = maybeCatalogPlugin.flatMap(catalogPlugin =>
+    plan.find(_.getClass.getSimpleName == "DataSourceV2Relation").get match {
+      case v2Relation: DataSourceV2Relation
+          if v2Relation.identifier.isEmpty ||
+            !isPathIdentifier(v2Relation.identifier.get.name(), spark) =>
+        val maybeCatalog = v2Relation.catalog.flatMap(catalogPlugin =>
           lookupExtractor[CatalogPluginCatalogExtractor].apply(catalogPlugin))
-        lookupExtractor[TableTableExtractor].apply(spark, invokeAs[AnyRef](v2Relation, "table"))
+        lookupExtractor[TableTableExtractor].apply(spark, v2Relation.table)
           .map { table =>
             val maybeOwner = TableExtractor.getOwner(v2Relation)
             table.copy(catalog = maybeCatalog, owner = maybeOwner)
           }
+      case _ => None
     }
   }
 }
@@ -257,9 +261,14 @@ class SubqueryAliasTableExtractor extends TableExtractor {
   override def apply(spark: SparkSession, v1: AnyRef): Option[Table] = {
     v1.asInstanceOf[SubqueryAlias] match {
       case SubqueryAlias(_, SubqueryAlias(identifier, _)) =>
+        if (isPathIdentifier(identifier.name, spark)) {
+          None
+        } else {
+          lookupExtractor[StringTableExtractor].apply(spark, identifier.toString())
+        }
+      case SubqueryAlias(identifier, _) if !isPathIdentifier(identifier.name, spark) =>
         lookupExtractor[StringTableExtractor].apply(spark, identifier.toString())
-      case SubqueryAlias(identifier, _) =>
-        lookupExtractor[StringTableExtractor].apply(spark, identifier.toString())
+      case _ => None
     }
   }
 }
@@ -283,6 +292,7 @@ class HudiDataSourceV2RelationTableExtractor extends TableExtractor {
       // Match multipartIdentifier without tableAlias
       case SubqueryAlias(identifier, _) =>
         lookupExtractor[StringTableExtractor].apply(spark, identifier.toString())
+      case _ => None
     }
   }
 }
@@ -296,11 +306,12 @@ class HudiMergeIntoTargetTableExtractor extends TableExtractor {
       // Match multipartIdentifier without tableAlias
       case SubqueryAlias(identifier, _) =>
         lookupExtractor[StringTableExtractor].apply(spark, identifier.toString())
+      case _ => None
     }
   }
 }
 
-abstract class HudiCallProcedureTableExtractor extends TableExtractor {
+trait HudiCallProcedureExtractor {
 
   protected def extractTableIdentifier(
       procedure: AnyRef,
@@ -323,201 +334,236 @@ abstract class HudiCallProcedureTableExtractor extends TableExtractor {
     }
   }
 
-  case class ProcedureArgsInputOutputPair(
-      input: Option[String] = None,
-      output: Option[String] = None)
+  case class ProcedureArgsInputOutputTuple(
+      inputTable: Option[String] = None,
+      outputTable: Option[String] = None,
+      inputUri: Option[String] = None,
+      outputUri: Option[String] = None)
 
   protected val PROCEDURE_CLASS_PATH = "org.apache.spark.sql.hudi.command.procedures"
 
   protected val INVALID_INDEX = -1
 
   // These pairs are used to get the procedure input/output args which user passed in call command.
-  protected val procedureArgsInputOutputPairs: Map[String, ProcedureArgsInputOutputPair] = Map(
+  protected val procedureArgsInputOutputPairs: Map[String, ProcedureArgsInputOutputTuple] = Map(
     (
       s"$PROCEDURE_CLASS_PATH.ArchiveCommitsProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.CommitsCompareProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.CopyToTableProcedure",
-      ProcedureArgsInputOutputPair(
-        input = Some("table"),
-        output = Some("new_table"))),
+      ProcedureArgsInputOutputTuple(
+        inputTable = Some("table"),
+        outputTable = Some("new_table"))),
     (
       s"$PROCEDURE_CLASS_PATH.CopyToTempViewProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.CreateMetadataTableProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.CreateSavepointProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.DeleteMarkerProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.DeleteMetadataTableProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.DeleteSavepointProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ExportInstantsProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.HdfsParquetImportProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.HelpProcedure",
-      ProcedureArgsInputOutputPair()),
+      ProcedureArgsInputOutputTuple()),
     (
       s"$PROCEDURE_CLASS_PATH.HiveSyncProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.InitMetadataTableProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.RepairAddpartitionmetaProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.RepairCorruptedCleanFilesProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.RepairDeduplicateProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.RepairMigratePartitionMetaProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.RepairOverwriteHoodiePropsProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.RollbackToInstantTimeProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.RollbackToSavepointProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.RunBootstrapProcedure",
-      ProcedureArgsInputOutputPair(
-        input = Some("table"),
-        output = Some("table"))),
+      ProcedureArgsInputOutputTuple(
+        inputTable = Some("table"),
+        outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.RunCleanProcedure",
-      ProcedureArgsInputOutputPair(
-        input = Some("table"),
-        output = Some("table"))),
+      ProcedureArgsInputOutputTuple(
+        inputTable = Some("table"),
+        outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.RunClusteringProcedure",
-      ProcedureArgsInputOutputPair(
-        input = Some("table"),
-        output = Some("table"))),
+      ProcedureArgsInputOutputTuple(
+        inputTable = Some("table"),
+        outputTable = Some("table"),
+        outputUri = Some("path"))),
     (
       s"$PROCEDURE_CLASS_PATH.RunCompactionProcedure",
-      ProcedureArgsInputOutputPair(
-        input = Some("table"),
-        output = Some("table"))),
+      ProcedureArgsInputOutputTuple(
+        inputTable = Some("table"),
+        outputTable = Some("table"),
+        outputUri = Some("path"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowArchivedCommitsProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowBootstrapMappingProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowClusteringProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"), inputUri = Some("path"))),
+    (
+      s"$PROCEDURE_CLASS_PATH.ShowCommitsProcedure",
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowCommitExtraMetadataProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowCommitFilesProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowCommitPartitionsProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowCommitWriteStatsProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowCompactionProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"), inputUri = Some("path"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowFileSystemViewProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowFsPathDetailProcedure",
-      ProcedureArgsInputOutputPair()),
+      ProcedureArgsInputOutputTuple()),
     (
       s"$PROCEDURE_CLASS_PATH.ShowHoodieLogFileMetadataProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowHoodieLogFileRecordsProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowInvalidParquetProcedure",
-      ProcedureArgsInputOutputPair()),
+      ProcedureArgsInputOutputTuple()),
     (
       s"$PROCEDURE_CLASS_PATH.ShowMetadataTableFilesProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowMetadataTablePartitionsProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowMetadataTableStatsProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowRollbacksProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowSavepointsProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ShowTablePropertiesProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.StatsFileSizeProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.StatsWriteAmplificationProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))),
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.UpgradeOrDowngradeProcedure",
-      ProcedureArgsInputOutputPair(output = Some("table"))),
+      ProcedureArgsInputOutputTuple(outputTable = Some("table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ValidateHoodieSyncProcedure",
-      ProcedureArgsInputOutputPair(
-        input = Some("src_table"),
-        output = Some("dst_table"))),
+      ProcedureArgsInputOutputTuple(
+        inputTable = Some("src_table"),
+        outputTable = Some("dst_table"))),
     (
       s"$PROCEDURE_CLASS_PATH.ValidateMetadataTableFilesProcedure",
-      ProcedureArgsInputOutputPair(input = Some("table"))))
+      ProcedureArgsInputOutputTuple(inputTable = Some("table"))))
 }
 
 class HudiCallProcedureOutputTableExtractor
-  extends HudiCallProcedureTableExtractor {
+  extends TableExtractor with HudiCallProcedureExtractor {
   override def apply(spark: SparkSession, v1: AnyRef): Option[Table] = {
     val procedure = invokeAs[AnyRef](v1, "procedure")
     val args = invokeAs[AnyRef](v1, "args")
     procedureArgsInputOutputPairs.get(procedure.getClass.getName)
-      .filter(_.output.isDefined)
+      .filter(_.outputTable.isDefined)
       .map { argsPairs =>
-        val tableIdentifier = extractTableIdentifier(procedure, args, argsPairs.output.get)
+        val tableIdentifier = extractTableIdentifier(procedure, args, argsPairs.outputTable.get)
         lookupExtractor[StringTableExtractor].apply(spark, tableIdentifier.get).orNull
       }
   }
 }
 
 class HudiCallProcedureInputTableExtractor
-  extends HudiCallProcedureTableExtractor {
+  extends TableExtractor with HudiCallProcedureExtractor {
   override def apply(spark: SparkSession, v1: AnyRef): Option[Table] = {
     val procedure = invokeAs[AnyRef](v1, "procedure")
     val args = invokeAs[AnyRef](v1, "args")
     procedureArgsInputOutputPairs.get(procedure.getClass.getName)
-      .filter(_.input.isDefined)
+      .filter(_.inputTable.isDefined)
       .map { argsPairs =>
-        val tableIdentifier = extractTableIdentifier(procedure, args, argsPairs.input.get)
+        val tableIdentifier = extractTableIdentifier(procedure, args, argsPairs.inputTable.get)
         lookupExtractor[StringTableExtractor].apply(spark, tableIdentifier.get).orNull
       }
+  }
+}
+
+class HudiCallProcedureInputUriExtractor
+  extends URIExtractor with HudiCallProcedureExtractor {
+  override def apply(spark: SparkSession, v1: AnyRef): Seq[Uri] = {
+    val procedure = invokeAs[AnyRef](v1, "procedure")
+    val args = invokeAs[AnyRef](v1, "args")
+    procedureArgsInputOutputPairs.get(procedure.getClass.getName)
+      .filter(_.inputUri.isDefined)
+      .map { argsPairs =>
+        val tableIdentifier = extractTableIdentifier(procedure, args, argsPairs.inputUri.get)
+        lookupExtractor[StringURIExtractor].apply(spark, tableIdentifier.get)
+      }.getOrElse(Nil)
+  }
+}
+
+class HudiCallProcedureOutputUriExtractor
+  extends URIExtractor with HudiCallProcedureExtractor {
+  override def apply(spark: SparkSession, v1: AnyRef): Seq[Uri] = {
+    val procedure = invokeAs[AnyRef](v1, "procedure")
+    val args = invokeAs[AnyRef](v1, "args")
+    procedureArgsInputOutputPairs.get(procedure.getClass.getName)
+      .filter(_.outputUri.isDefined)
+      .map { argsPairs =>
+        val tableIdentifier = extractTableIdentifier(procedure, args, argsPairs.outputUri.get)
+        lookupExtractor[StringURIExtractor].apply(spark, tableIdentifier.get)
+      }.getOrElse(Nil)
   }
 }

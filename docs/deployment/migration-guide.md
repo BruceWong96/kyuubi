@@ -17,9 +17,25 @@
 
 # Kyuubi Migration Guide
 
+## Upgrading from Kyuubi 1.9 to 1.10
+
+* Since Kyuubi 1.10, `beeline` is deprecated and will be removed in the future, please use `kyuubi-beeline` instead.
+* Since Kyuubi 1.10, the support of Spark engine for Spark 3.1 is removed.
+* Since Kyuubi 1.10, the support of Flink engine for Flink 1.16 is removed.
+
 ## Upgrading from Kyuubi 1.8 to 1.9
 
 * Since Kyuubi 1.9.0, `kyuubi.session.conf.advisor` can be set as a sequence, Kyuubi supported chaining SessionConfAdvisors.
+* Since Kyuubi 1.9.0, the support of Derby is removal for Kyuubi metastore.
+* Since Kyuubi 1.9.0, the support of Spark SQL engine for Spark 3.1 is deprecated, and will be removed in the future.
+* Since Kyuubi 1.9.0, the support of Spark extensions for Spark 3.1 is removed, please use Spark 3.2 or higher versions.
+* Since Kyuubi 1.9.0, `kyuubi.frontend.login.timeout`, `kyuubi.frontend.thrift.login.timeout`, `kyuubi.frontend.backoff.slot.length`, `kyuubi.frontend.thrift.backoff.slot.length` are removed.
+* Since Kyuubi 1.9.0, the support of Flink engine for Flink 1.16 is deprecated, and will be removed in the future.
+
+## Upgrading from Kyuubi 1.8.0 to 1.8.1
+
+* Since Kyuubi 1.8.1, for `DELETE /batches/${batchId}`, `hive.server2.proxy.user` is not needed in the request parameters.
+* Since Kyuubi 1.8.1, the default SQLite file `kyuubi_state_store.db` for Metadata store is located under `$KYUUBI_HOME` instead of `$PWD`. To restore previous behavior, set `kyuubi.metadata.store.jdbc.url` to `jdbc:sqlite:kyuubi_state_store.db`.
 
 ## Upgrading from Kyuubi 1.7 to 1.8
 

@@ -26,6 +26,7 @@ import scala.concurrent.duration.Duration
 import scala.util.control.NonFatal
 
 import com.google.common.annotations.VisibleForTesting
+import org.apache.hadoop.fs.Path
 import org.apache.spark.{ui, SparkConf}
 import org.apache.spark.kyuubi.{SparkContextHelper, SparkSQLEngineEventListener, SparkSQLEngineListener}
 import org.apache.spark.kyuubi.SparkUtilsHelper.getLocalDir
@@ -39,13 +40,14 @@ import org.apache.kyuubi.config.KyuubiReservedKeys.{KYUUBI_ENGINE_SUBMIT_TIME_KE
 import org.apache.kyuubi.engine.ShareLevel
 import org.apache.kyuubi.engine.spark.SparkSQLEngine.{countDownLatch, currentEngine}
 import org.apache.kyuubi.engine.spark.events.{EngineEvent, EngineEventsStore, SparkEventHandlerRegister}
-import org.apache.kyuubi.engine.spark.session.SparkSessionImpl
+import org.apache.kyuubi.engine.spark.session.{SparkSessionImpl, SparkSQLSessionManager}
 import org.apache.kyuubi.events.EventBus
 import org.apache.kyuubi.ha.HighAvailabilityConf._
 import org.apache.kyuubi.ha.client.RetryPolicies
 import org.apache.kyuubi.service.Serverable
 import org.apache.kyuubi.session.SessionHandle
 import org.apache.kyuubi.util.{SignalRegister, ThreadUtils}
+import org.apache.kyuubi.util.ThreadUtils.scheduleTolerableRunnableWithFixedDelay
 
 case class SparkSQLEngine(spark: SparkSession) extends Serverable("SparkSQLEngine") {
 
@@ -57,6 +59,8 @@ case class SparkSQLEngine(spark: SparkSession) extends Serverable("SparkSQLEngin
 
   @volatile private var lifetimeTerminatingChecker: Option[ScheduledExecutorService] = None
   @volatile private var stopEngineExec: Option[ThreadPoolExecutor] = None
+  private lazy val engineSavePath =
+    backendService.sessionManager.asInstanceOf[SparkSQLSessionManager].getEngineResultSavePath()
 
   override def initialize(conf: KyuubiConf): Unit = {
     val listener = new SparkSQLEngineListener(this)
@@ -86,6 +90,13 @@ case class SparkSQLEngine(spark: SparkSession) extends Serverable("SparkSQLEngin
       maxInitTimeout > 0) {
       startFastFailChecker(maxInitTimeout)
     }
+
+    if (backendService.sessionManager.getConf.get(OPERATION_RESULT_SAVE_TO_FILE)) {
+      val path = new Path(engineSavePath)
+      val fs = path.getFileSystem(spark.sparkContext.hadoopConfiguration)
+      fs.mkdirs(path)
+      fs.deleteOnExit(path)
+    }
   }
 
   override def stop(): Unit = if (shutdown.compareAndSet(false, true)) {
@@ -101,6 +112,15 @@ case class SparkSQLEngine(spark: SparkSession) extends Serverable("SparkSQLEngin
         exec,
         Duration(60, TimeUnit.SECONDS))
     })
+    try {
+      val path = new Path(engineSavePath)
+      val fs = path.getFileSystem(spark.sparkContext.hadoopConfiguration)
+      if (fs.exists(path)) {
+        fs.delete(path, true)
+      }
+    } catch {
+      case e: Throwable => error(s"Error cleaning engine result save path: $engineSavePath", e)
+    }
   }
 
   def gracefulStop(): Unit = if (gracefulStopDeregistered.compareAndSet(false, true)) {
@@ -108,8 +128,8 @@ case class SparkSQLEngine(spark: SparkSession) extends Serverable("SparkSQLEngin
       if (!shutdown.get) {
         info(s"Spark engine is de-registering from engine discovery space.")
         frontendServices.flatMap(_.discoveryService).foreach(_.stop())
-        while (backendService.sessionManager.getOpenSessionCount > 0) {
-          Thread.sleep(1000 * 60)
+        while (backendService.sessionManager.getActiveUserSessionCount > 0) {
+          Thread.sleep(TimeUnit.SECONDS.toMillis(10))
         }
         info(s"Spark engine has no open session now, terminating.")
         stop()
@@ -125,12 +145,12 @@ case class SparkSQLEngine(spark: SparkSession) extends Serverable("SparkSQLEngin
     Utils.tryLogNonFatalError {
       ThreadUtils.runInNewThread("spark-engine-failfast-checker") {
         if (!shutdown.get) {
-          while (backendService.sessionManager.getOpenSessionCount <= 0 &&
+          while (backendService.sessionManager.getActiveUserSessionCount <= 0 &&
             System.currentTimeMillis() - startedTime < maxTimeout) {
             info(s"Waiting for the initial connection")
             Thread.sleep(Duration(10, TimeUnit.SECONDS).toMillis)
           }
-          if (backendService.sessionManager.getOpenSessionCount <= 0) {
+          if (backendService.sessionManager.getActiveUserSessionCount <= 0) {
             error(s"Spark engine has been terminated because no incoming connection" +
               s" for more than $maxTimeout ms, de-registering from engine discovery space.")
             assert(currentEngine.isDefined)
@@ -150,24 +170,45 @@ case class SparkSQLEngine(spark: SparkSession) extends Serverable("SparkSQLEngin
     val maxLifetime = conf.get(ENGINE_SPARK_MAX_LIFETIME)
     val deregistered = new AtomicBoolean(false)
     if (maxLifetime > 0) {
+      val gracefulPeriod = conf.get(ENGINE_SPARK_MAX_LIFETIME_GRACEFUL_PERIOD)
       val checkTask: Runnable = () => {
-        if (!shutdown.get && System.currentTimeMillis() - getStartTime > maxLifetime) {
+        val elapsedTime = System.currentTimeMillis() - getStartTime
+        if (!shutdown.get && elapsedTime > maxLifetime) {
           if (deregistered.compareAndSet(false, true)) {
             info(s"Spark engine has been running for more than $maxLifetime ms," +
               s" deregistering from engine discovery space.")
             frontendServices.flatMap(_.discoveryService).foreach(_.stop())
           }
 
-          if (backendService.sessionManager.getOpenSessionCount <= 0) {
+          if (backendService.sessionManager.getActiveUserSessionCount <= 0) {
             info(s"Spark engine has been running for more than $maxLifetime ms" +
               s" and no open session now, terminating.")
             stop()
+          } else if (gracefulPeriod > 0 && elapsedTime > maxLifetime + gracefulPeriod) {
+            backendService.sessionManager.allSessions().foreach { session =>
+              val operationCount =
+                backendService.sessionManager.operationManager.allOperations()
+                  .filter(_.getSession == session)
+                  .size
+              if (operationCount == 0) {
+                warn(s"Closing session ${session.handle.identifier} forcibly that has no" +
+                  s" operation and has been running for more than $gracefulPeriod ms after engine" +
+                  s" max lifetime.")
+                try {
+                  backendService.sessionManager.closeSession(session.handle)
+                } catch {
+                  case e: Throwable =>
+                    error(s"Error closing session ${session.handle.identifier}", e)
+                }
+              }
+            }
           }
         }
       }
       lifetimeTerminatingChecker =
         Some(ThreadUtils.newDaemonSingleThreadScheduledExecutor("spark-engine-lifetime-checker"))
-      lifetimeTerminatingChecker.get.scheduleWithFixedDelay(
+      scheduleTolerableRunnableWithFixedDelay(
+        lifetimeTerminatingChecker.get,
         checkTask,
         interval,
         interval,
@@ -221,6 +262,11 @@ object SparkSQLEngine extends Logging {
     val rootDir = _sparkConf.getOption("spark.repl.classdir").getOrElse(getLocalDir(_sparkConf))
     val outputDir = Utils.createTempDir(prefix = "repl", root = rootDir)
     _sparkConf.setIfMissing("spark.sql.legacy.castComplexTypesToString.enabled", "true")
+    // SPARK-47911: we must set a value instead of leaving it as None, otherwise, we will get a
+    // "Cannot mutate ReadOnlySQLConf" exception when task calling HiveResult.getBinaryFormatter.
+    // Here we follow the HiveResult.getBinaryFormatter behavior to set it to UTF8 if configuration
+    // is absent to reserve the legacy behavior for compatibility.
+    _sparkConf.setIfMissing("spark.sql.binaryOutputStyle", "UTF8")
     _sparkConf.setIfMissing("spark.master", "local")
     _sparkConf.set(
       "spark.redaction.regex",
@@ -288,7 +334,8 @@ object SparkSQLEngine extends Logging {
 
     KyuubiSparkUtil.initializeSparkSession(
       session,
-      kyuubiConf.get(ENGINE_INITIALIZE_SQL) ++ kyuubiConf.get(ENGINE_SESSION_INITIALIZE_SQL))
+      kyuubiConf.get(ENGINE_SPARK_INITIALIZE_SQL) ++ kyuubiConf.get(
+        ENGINE_SESSION_SPARK_INITIALIZE_SQL))
     session.sparkContext.setLocalProperty(KYUUBI_ENGINE_URL, KyuubiSparkUtil.engineUrl)
     session
   }

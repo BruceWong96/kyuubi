@@ -24,18 +24,18 @@ import scala.collection.JavaConverters._
 import scala.language.implicitConversions
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hive.service.rpc.thrift._
-import org.apache.thrift.protocol.TProtocol
-import org.apache.thrift.server.{ServerContext, TServerEventHandler}
-import org.apache.thrift.transport.TTransport
 
 import org.apache.kyuubi.{KyuubiSQLException, Logging, Utils}
 import org.apache.kyuubi.Utils.stringifyException
 import org.apache.kyuubi.config.KyuubiConf.{FRONTEND_ADVERTISED_HOST, FRONTEND_CONNECTION_URL_USE_HOSTNAME, PROXY_USER, SESSION_CLOSE_ON_DISCONNECT}
 import org.apache.kyuubi.config.KyuubiReservedKeys._
 import org.apache.kyuubi.operation.{FetchOrientation, OperationHandle}
-import org.apache.kyuubi.service.authentication.KyuubiAuthenticationFactory
+import org.apache.kyuubi.service.authentication.{AuthUtils, KyuubiAuthenticationFactory}
 import org.apache.kyuubi.session.SessionHandle
+import org.apache.kyuubi.shaded.hive.service.rpc.thrift._
+import org.apache.kyuubi.shaded.thrift.protocol.TProtocol
+import org.apache.kyuubi.shaded.thrift.server.{ServerContext, TServerEventHandler}
+import org.apache.kyuubi.shaded.thrift.transport.TTransport
 import org.apache.kyuubi.util.{KyuubiHadoopUtils, NamedThreadFactory}
 
 /**
@@ -128,11 +128,11 @@ abstract class TFrontendService(name: String)
       ipAddress: String,
       realUser: String): String = {
     val proxyUser = Option(sessionConf.get(PROXY_USER.key))
-      .getOrElse(sessionConf.get(KyuubiAuthenticationFactory.HS2_PROXY_USER))
+      .getOrElse(sessionConf.get(AuthUtils.HS2_PROXY_USER))
     if (proxyUser == null) {
       realUser
     } else {
-      KyuubiAuthenticationFactory.verifyProxyAccess(realUser, proxyUser, ipAddress, hadoopConf)
+      AuthUtils.verifyProxyAccess(realUser, proxyUser, ipAddress, hadoopConf)
       proxyUser
     }
   }
@@ -594,6 +594,16 @@ abstract class TFrontendService(name: String)
     resp
   }
 
+  override def UploadData(req: TUploadDataReq): TUploadDataResp = {
+    debug(req.toString)
+    throw KyuubiSQLException.featureNotSupported("Method UploadData has not been implemented.")
+  }
+
+  override def DownloadData(req: TDownloadDataReq): TDownloadDataResp = {
+    debug(req.toString)
+    throw KyuubiSQLException.featureNotSupported("Method DownloadData has not been implemented.")
+  }
+
   protected def isServer(): Boolean = false
 
   class FeTServerEventHandler extends TServerEventHandler {
@@ -649,5 +659,9 @@ private[kyuubi] object TFrontendService {
     }
 
     def getSessionHandle: SessionHandle = sessionHandle
+
+    override def unwrap[T](aClass: Class[T]): T = null.asInstanceOf[T]
+
+    override def isWrapperFor(aClass: Class[_]): Boolean = false
   }
 }

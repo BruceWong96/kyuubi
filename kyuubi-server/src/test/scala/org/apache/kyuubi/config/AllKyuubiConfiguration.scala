@@ -21,12 +21,13 @@ import java.nio.file.Paths
 
 import scala.collection.JavaConverters._
 
-import org.apache.kyuubi.{KyuubiFunSuite, MarkdownBuilder, Utils}
+import org.apache.kyuubi.{KyuubiFunSuite, MarkdownBuilder}
 import org.apache.kyuubi.ctl.CtlConf
 import org.apache.kyuubi.ha.HighAvailabilityConf
 import org.apache.kyuubi.metrics.MetricsConf
 import org.apache.kyuubi.server.metadata.jdbc.JDBCMetadataStoreConf
 import org.apache.kyuubi.util.GoldenFileUtils._
+import org.apache.kyuubi.util.JavaUtils
 import org.apache.kyuubi.zookeeper.ZookeeperConf
 
 /**
@@ -44,7 +45,8 @@ import org.apache.kyuubi.zookeeper.ZookeeperConf
  * }}}
  */
 class AllKyuubiConfiguration extends KyuubiFunSuite {
-  private val kyuubiHome: String = Utils.getCodeSourceLocation(getClass).split("kyuubi-server")(0)
+  private val kyuubiHome: String =
+    JavaUtils.getCodeSourceLocation(getClass).split("kyuubi-server")(0)
   private val markdown = Paths.get(kyuubiHome, "docs", "configuration", "settings.md")
     .toAbsolutePath
 
@@ -125,12 +127,12 @@ class AllKyuubiConfiguration extends KyuubiFunSuite {
         | override all settings in `$SPARK_HOME/conf/spark-defaults.conf`""" +=
       "### Via JDBC Connection URL" +=
       """ Setting them in the JDBC Connection URL
-        | supplies session-specific for each SQL engine. For example:
-        | ```
-        |jdbc:hive2://localhost:10009/default;#
-        |spark.sql.shuffle.partitions=2;spark.executor.memory=5g
-        |```
-        |""" +=
+        | supplies session-specific for each SQL engine. For example:""" ++=
+      // scalastyle:off
+      """```
+        |jdbc:hive2://localhost:10009/default;#spark.sql.shuffle.partitions=2;spark.executor.memory=5g
+        |```""" +=
+      // scalastyle:on
       "" +=
       "- **Runtime SQL Configuration**" +=
       """  - For [Runtime SQL Configurations](
@@ -168,11 +170,14 @@ class AllKyuubiConfiguration extends KyuubiFunSuite {
         |```""" +=
       """The below options in `kyuubi-defaults.conf` will set `parallelism.default: 2`
         | and `taskmanager.memory.process.size: 5g` into flink configurations.""" +=
-      "### Via JDBC Connection URL" +=
-      """Setting them in the JDBC Connection URL supplies session-specific
-        | for each SQL engine. For example: ```jdbc:hive2://localhost:10009/default;
-        |#parallelism.default=2;taskmanager.memory.process.size=5g```
-        |""" +=
+      "### Via JDBC Connection URL" ++=
+      "Setting them in the JDBC Connection URL supplies session-specific for each SQL engine." +
+        " For example:" ++=
+      // scalastyle:off
+      """```
+        | jdbc:hive2://localhost:10009/default;#flink.parallelism.default=2;flink.taskmanager.memory.process.size=5g
+        |```""" +=
+      // scalastyle:on
       "### Via SET Statements" +=
       """Please refer to the Flink official online documentation for [SET Statements]
         |(https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/table/sql/set/)"""
@@ -199,10 +204,14 @@ class AllKyuubiConfiguration extends KyuubiFunSuite {
       """The below options in `kyuubi-defaults.conf` will set `query_max_stage_count: 500`
         | and `parse_decimal_literals_as_double: true` into trino session properties.""" +=
       "### Via JDBC Connection URL" +=
-      """Setting them in the JDBC Connection URL supplies session-specific
-        | for each SQL engine. For example: ```jdbc:hive2://localhost:10009/default;
-        |#trino.query_max_stage_count=500;trino.parse_decimal_literals_as_double=true```
+      "Setting them in the JDBC Connection URL supplies session-specific for each SQL engine." +
+        " For example:" ++=
+      // scalastyle:off
+      """ ```
+        | jdbc:hive2://localhost:10009/default;#trino.query_max_stage_count=500;trino.parse_decimal_literals_as_double=true
+        | ```
         |""" +=
+      // scalastyle:on
       "### Via SET Statements" +=
       """Please refer to the Trino official online documentation for [SET Statements]
         |(https://trino.io/docs/current/sql/set-session.html)"""
